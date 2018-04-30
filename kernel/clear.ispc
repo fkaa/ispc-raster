@@ -15,8 +15,8 @@ task void fast_clear_task(uniform int buffer[], uniform int width, uniform int h
 export void fast_clear(uniform int buffer[], uniform int width, uniform int height, uniform int color)
 {
     const uniform int xspan = max(32, programCount*2);
-	const uniform int yspan = 16; 
+    const uniform int yspan = 16; 
 
     launch[width/xspan, height/yspan] fast_clear_task(buffer, width, height, xspan, yspan, color);
-	sync;
+    sync;
 }
