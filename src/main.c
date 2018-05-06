@@ -38,10 +38,12 @@ double GetCounter()
 
 extern void fast_clear(uint32_t *buffer_, uint32_t width_, uint32_t height_, uint32_t color_);
 
-void clear(uint32_t color)
+void clear(uint32_t color, float depth)
 {
     fast_clear(buffer, buffer_width, buffer_height, color);
-    fast_clear(zbuffer, buffer_width, buffer_height, 0x00000000);
+
+    int fp = *(int*)&depth;
+    fast_clear(zbuffer, buffer_width, buffer_height, fp);
 }
 
 static void resize(HWND wnd, int w, int h)
@@ -79,10 +81,11 @@ static void resize(HWND wnd, int w, int h)
 
 static bool setd(int x, int y, float depth)
 {
-    if (x >= buffer_width || x < 0 || y >= buffer_height || y < 0) return;
+    if (x >= buffer_width || x < 0 || y >= buffer_height || y < 0) return false;
     int idx = x + y * buffer_width;
-    if (zbuffer[idx] > depth) return;
+    if (zbuffer[idx] < depth) return false;
     zbuffer[idx] = depth;
+    return true;
 }
 
 static void set(int x, int y, uint32_t color)
@@ -146,7 +149,7 @@ struct vmodel load_vmodel(const char *path)
     return model;
 }
 
-static struct rect triangle_bbox(struct float2 vertices[3])
+static struct rect triangle_bbox(struct float4 vertices[3])
 {
     struct rect bbox = { buffer_width - 1, buffer_height - 1, 0, 0 };
 
@@ -184,12 +187,23 @@ static struct float3 triangle_barycentrics(struct float4 vertices[3], struct flo
         a.x * b.y - a.y * b.x
     };
 
-    if (abs(u.z) < 1.f) return (struct float3) { -1.f, 1.f, 1.f };
+    if (fabs(u.z) < 1.f) return (struct float3) { -1.f, 1.f, 1.f };
 
     return (struct float3) { 1.f - (u.x + u.y) / u.z, u.y / u.z, u.x / u.z };
 }
 
 static void line(float x0, float y0, float x1, float y1, uint32_t color0, uint32_t color1);
+static uint32_t colmul(uint32_t col, float t);
+static uint32_t coladd(uint32_t c1, uint32_t c2)
+{
+    int b = (c1&0xff) + (c2&0xff); //split and add
+    int g = (c1&0xff00) + (c2&0xff00);
+    int r = (c1&0xff0000) + (c2&0xff0000);
+    if (b>0xff) b=0xff; //saturate
+    if (g>0xff00) g=0xff00;
+    if (r>0xff0000) r=0xff0000;
+    return b | g | r; //combine them back
+}
 
 static void triangle(struct float4 vertices[3], int color)
 {
@@ -200,6 +214,11 @@ static void triangle(struct float4 vertices[3], int color)
     //line(bbox.w, bbox.h, bbox.w, bbox.y, 0x22222222, 0x22222222);
     //line(bbox.w, bbox.y, bbox.x, bbox.y, 0x22222222, 0x22222222);
 
+    int colA = color;
+    int colB = (color + 123123) * 123124;
+    int colC = (color) * 13124;
+
+
     for (int y = bbox.y; y < bbox.h; ++y) {
         for (int x = bbox.x; x < bbox.w; ++x) {
             struct float3 barycentrics = triangle_barycentrics(vertices, (struct float2) { x, y });
@@ -208,9 +227,10 @@ static void triangle(struct float4 vertices[3], int color)
             }
 
             float depth = vertices[0].z * barycentrics.x + vertices[1].z * barycentrics.y + vertices[2].z * barycentrics.z;
+            int c = coladd(coladd(colmul(colA, barycentrics.x), colmul(colB, barycentrics.y)), colmul(colC, barycentrics.z));
 
             if (setd(x, y, depth)) {
-                set(x, y, color);
+                set(x, y, c);
             }
         }
     }
@@ -219,8 +239,8 @@ static void triangle(struct float4 vertices[3], int color)
 
 static void model(struct vmodel model, struct float4x4 mat)
 {
-    struct float4x4 viewport = mat4_viewport(0, 0, buffer_width, buffer_height);
-    struct float4x4 transform = mat4_mul(viewport, mat);
+    struct float4x4 viewport = mat4_viewport(0, 0, buffer_height, buffer_width);// buffer_width*2.f, buffer_height*2.f);
+    struct float4x4 transform = mat;// mat4_mul(mat, viewport);
 
     for (int i = 0; i < model.index_len; i += 3) {
         uint16_t ai = model.indices[i];
@@ -231,14 +251,20 @@ static void model(struct vmodel model, struct float4x4 mat)
         struct float3 c = model.vertices[ci].position;
 
         struct float4 ta = vec4_transform((struct float4) { a.x, a.y, a.z, 1.f }, transform);
+        ta = vec4_muls(ta, 1.f / ta.w);
+        ta = vec4_transform(ta, viewport);
         struct float4 tb = vec4_transform((struct float4) { b.x, b.y, b.z, 1.f }, transform);
+        tb = vec4_muls(tb, 1.f / tb.w);
+        tb = vec4_transform(tb, viewport);
         struct float4 tc = vec4_transform((struct float4) { c.x, c.y, c.z, 1.f }, transform);
+        tc = vec4_muls(tc, 1.f / tc.w);
+        tc = vec4_transform(tc, viewport);
 
         triangle((struct float4[3]) {
             ta,
             tb,
             tc
-        }, (i + 1000) * 409020);
+        }, (i + 100) * 409020);
     }
 }
 
@@ -259,6 +285,16 @@ static uint32_t lerpu(uint32_t a, uint32_t b, float t)
 
     return (((((a & rb) * f1) + ((b & rb) * f2)) >> 8) & rb)
          | (((((a & g)  * f1) + ((b & g)  * f2)) >> 8) & g);
+}
+
+static uint32_t colmul(uint32_t col, float t)
+{
+    const uint32_t rb = 0xff00ff;
+    const uint32_t g = 0x00ff00;
+
+    uint32_t f1 = 256 * t;
+
+    return (((((col & rb) * f1)) >> 8) & rb) | (((((col & g)  * f1)) >> 8) & g);
 }
 
 static void line(float x0, float y0, float x1, float y1, uint32_t color0, uint32_t color1)
@@ -306,11 +342,7 @@ LRESULT CALLBACK WndProc(_In_ HWND wnd, _In_ UINT msg, _In_ WPARAM wParam, _In_ 
         HDC hdc = BeginPaint(wnd, &ps);
 
         SelectObject(hdc_buffer, bitmap);
-        //BitBlt(hdc, 0, 0, 512, 512, hdc_buffer, 0, 0, SRCCOPY);
         StretchBlt(hdc, 0, 0, window_width, window_height, hdc_buffer, 0, 0, buffer_width, buffer_height, SRCCOPY);
-
-        //DeleteDC(hdcMem);
-
         EndPaint(wnd, &ps);
     } break;
     case WM_SIZE: 
@@ -389,6 +421,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 
 
     MSG msg;
+    float t = 0.f;
     while (1) {
         while (PeekMessage(&msg, 0, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg);
@@ -405,26 +438,39 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 
         StartCounter();
 
-        /*for (int i = 0; i < 512; i++) {
-            for (int j = 0; j < 512; j++) {
-                int idx = i + j * 512;
-                uint32_t c = 0xfffefefe;
-                uint32_t color = buffer[idx];
-                uint32_t b = ((color & 0xff) * (c & 0xff)) >> 8;
-                uint32_t g = ((((color & 0xff00) >> 8) * ((c & 0xff00)) >> 8) >> 8) ;
-                uint32_t r = ((((color & 0xff0000) >> 16) * ((c & 0xff0000)) >> 16) >> 8) ;
-                buffer[idx] = (r << 16) | (g << 8) | b;
-            }
-        }*/
-        clear(0x00000000);
+        clear(0x00000000, 1.f);
 
         line(0, 0, buffer_width, buffer_height, 0xffff0000, 0x0000ffff);
 
         struct float4x4 proj = mat4_perspective_RH(60.f * 3.14f / 180.f, buffer_width / (float)buffer_height, .01f, 100.f);
-        struct float4x4 view = mat4_look_at_RH((struct float3) { 100, 100, 100 }, (struct float3) { 0, 0, 0 }, (struct float3) { 0, 1, 0 });
-        struct float4x4 mat = mat4_mul(proj, view);
+        struct float4x4 view = mat4_look_at_RH((struct float3) { sin(t)*4, p.x/100.f, cos(t)*4 }, (struct float3) { 0, 1.5f, 0 }, (struct float3) { 0, 1, 0 });
+        struct float4x4 mat = mat4_mul(view, proj);
+        struct float4x4 identity = mat4_identity();
 
+        uint16_t i[3] = { 0,1,2 };
+        struct vvertex v[3] = {
+            {{-0.5, -0.5, 0}},
+            {{0, 0.5, 0}},
+            {{0.5, -0.5, 0}},
+        };
+        struct vmodel m = {
+            .index_len = 3,
+            .vertex_len = 3,
+            .indices = i,
+            .vertices = v,
+        };
+        //model(m, mat);
         model(bird_model, mat);
+        /*for (int i = 0; i < buffer_height; i++) {
+            for (int j = 0; j < buffer_width; j++) {
+                int idx = i + j * buffer_height;
+                float d = zbuffer[idx];
+                if (d > 0.f) {
+                    int c = d * 255.f;
+                    buffer[idx] = (c << 24) | (c << 16) | (c << 8) | c;
+                }
+            }
+        }*/
 
         double ms = GetCounter();
         char title[256];
@@ -434,6 +480,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
         InvalidateRect(hWnd, NULL, 0);
         UpdateWindow(hWnd);
         Sleep(1);
+        t += 0.01f;
     }
 
     return (int)msg.wParam;

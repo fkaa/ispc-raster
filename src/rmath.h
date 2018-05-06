@@ -183,14 +183,14 @@ static struct float4x4 mat4_look_at_RH(struct float3 pos, struct float3 target, 
     }};
 }
 
-static struct float4x4 mat4_viewport(float x, float y, float w, float h)
+static struct float4x4 mat4_viewport(float l, float b, float t, float r)
 {
-    float depth = 255.f;
+    float depth = 1.f;
     return (struct float4x4) {{
-        { w/2.f, 0.f, 0.f, x+w/2.f },
-        { 0.f, h/2.f, 0.f, y+h/2.f },
-        { 0.f, 0.f, depth/2.f, depth/2.f },
-        { 0.f, 0.f, 0.f, 1.f }
+        { (r-l)/2.f, 0.f, 0.f, 0.f },
+        { 0.f, (t-b)/2.f, 0.f, 0.f },
+        { 0.f, 0.f, depth/2.f, 0.f },
+        { (r+l)/2.f, (t+b)/2.f, depth/2.f, 1.f }
     }};
 }
 
